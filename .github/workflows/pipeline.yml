@@ -1,0 +1,98 @@
+name: CI/CD Pipeline Zadanie 2
+
+# pipeline uruchamia się przy każdym pushu na gałąź main
+on:
+  push:
+    branches:
+      - main
+
+# Definicja zmiennych środowiskowych
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-scan-and-push:
+    runs-on: ubuntu-latest
+    # Nadanie uprawnień do zapisu w GitHub Container Registry (ghcr.io)
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # 1. Pobranie kodu źródłowego z repozytorium
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Konfiguracja QEMU (potrzebne do budowy obrazów dla architektury ARM)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 3. Konfiguracja Docker Buildx (rozszerzony builder wspierający multi-arch i zaawansowany cache)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 4. Logowanie do DockerHub (w celu obsługi zewnętrznego cache)
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 5. Logowanie do GitHub Container Registry (docelowe miejsce dla obrazu)
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 6. Strategia tagowania
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tagowanie najnowszej wersji
+            type=raw,value=latest,enable={{is_default_branch}}
+            # Tagowanie unikalnym hashem commita (immutable tags)
+            type=sha,format=long
+
+      # 7. Budowa lokalnego obrazu (tylko amd64) na potrzeby skanowania
+      # (Docker nie pozwala na łatwy eksport multi-arch do lokalnego demona)
+      - name: Build local image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: localbuild:test
+          # Wykorzystujemy cache z DockerHub do przyspieszenia tej budowy
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pawcho-cache:main
+
+      # 8. Skanowanie podatności narzędziem Trivy
+      # Pipeline zostanie przerwany jeśli wykryje podatności CRITICAL lub HIGH
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'localbuild:test'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      # 9. Budowa Multi-Arch i Push do GHCR
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # Wsparcie dla dwóch architektur
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Konfiguracja zewnętrznego cache na DockerHub
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pawcho-cache:main
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pawcho-cache:main,mode=max
