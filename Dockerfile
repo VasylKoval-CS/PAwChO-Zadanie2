@@ -16,7 +16,7 @@ COPY main.go .
 
 # Kompilacja statyczna:
 # -ldflags="-w -s" - usuwa informacje debugowania, zmniejszając rozmiar pliku binarnego
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o webapp main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -a -installsuffix cgo -o webapp main.go
 
 # ==========================================
 # ETAP 2: Obraz docelowy (Release)
